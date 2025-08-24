@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -78,6 +79,11 @@ func scrapeGotSportSchedule(eventID, clubID string) ([]Game, error) {
 	html := string(body)
 	log.Printf("HTML length: %d chars", len(html))
 	
+	// Log a sample of HTML for debugging
+	if len(html) > 1000 {
+		log.Printf("HTML sample: %s...", html[:1000])
+	}
+	
 	// Only parse weekend games
 	games := parseWeekendGames(html, eventID)
 	
@@ -135,11 +141,11 @@ func extractSectionAroundDate(html, dateStr string) string {
 	}
 	
 	// Get section around the date (enough to capture the day's games)
-	start := index - 1000
+	start := index - 2000  // Increased context
 	if start < 0 {
 		start = 0
 	}
-	end := index + 3000 // Enough for several games
+	end := index + 5000 // Increased to capture more game details
 	if end > len(html) {
 		end = len(html)
 	}
@@ -159,7 +165,7 @@ func findRenoApexGamesInSection(section string) []Game {
 		// Only include HOME games
 		if game.HomeTeam != "" && strings.Contains(strings.ToLower(game.HomeTeam), "reno apex") {
 			games = append(games, game)
-			log.Printf("Weekend home game: %s vs %s", game.HomeTeam, game.AwayTeam)
+			log.Printf("Weekend home game: %s vs %s at %s %s", game.HomeTeam, game.AwayTeam, game.Time, game.Venue)
 		}
 	}
 	
@@ -181,21 +187,22 @@ func findAllOccurrences(text, substr string) []int {
 }
 
 func extractGameFromContext(section string, index int) Game {
-	// Get context around this specific Reno Apex mention
-	start := index - 200
+	// Get larger context around this specific Reno Apex mention
+	start := index - 500  // Increased context
 	if start < 0 {
 		start = 0
 	}
-	end := index + 500
+	end := index + 1000   // Increased context
 	if end > len(section) {
 		end = len(section)
 	}
 	
 	context := section[start:end]
+	log.Printf("Game context sample: %s", context[:min(300, len(context))])
 	
 	game := Game{}
 	
-	// Extract game details from this small context
+	// Extract game details from this context
 	game.HomeTeam = extractTeamName(context, "reno apex")
 	game.AwayTeam = findOpponentInContext(context)
 	game.Date = findDateInContext(context)
@@ -268,48 +275,158 @@ func findDateInContext(context string) string {
 	return nextSaturday.Format("2006-01-02") // Default to Saturday
 }
 
+// IMPROVED: Better time extraction with multiple patterns
 func findTimeInContext(context string) string {
-	// Look for time patterns like "10:30 AM PDT"
-	words := strings.Fields(context)
-	for i, word := range words {
-		if strings.Contains(word, ":") && i+1 < len(words) {
-			next := words[i+1]
-			if strings.HasPrefix(next, "AM") || strings.HasPrefix(next, "PM") {
-				return word + " " + strings.Fields(next)[0]
-			}
+	// Multiple time patterns to try
+	timePatterns := []string{
+		// Pattern 1: "10:30 AM PDT" or "10:30 PM PST"
+		`(\d{1,2}:\d{2})\s+(AM|PM)\s*(PDT|PST|PT)?`,
+		// Pattern 2: "10:30 AM" or "2:00 PM"  
+		`(\d{1,2}:\d{2})\s+(AM|PM)`,
+		// Pattern 3: Just the time "10:30" followed by AM/PM
+		`(\d{1,2}:\d{2})[^\w]*([AP]M)`,
+		// Pattern 4: Time in 24-hour format "14:30"
+		`(\d{2}:\d{2})`,
+	}
+	
+	for _, pattern := range timePatterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindStringSubmatch(context)
+		if len(matches) >= 2 {
+			timeStr := strings.TrimSpace(matches[0])
+			log.Printf("Found time with pattern '%s': %s", pattern, timeStr)
+			return timeStr
 		}
 	}
-	return "TBD"
-}
-
-func findVenueAndFieldInContext(context string) (string, string) {
-	lines := strings.Split(context, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if (strings.Contains(line, "Complex") || strings.Contains(line, "Park")) && strings.Contains(line, "<a href=") {
-			// Extract location from <a> tag
-			if start := strings.Index(line, ">"); start != -1 {
-				if end := strings.Index(line[start+1:], "<"); end != -1 {
-					location := strings.TrimSpace(line[start+1 : start+1+end])
-					if strings.Contains(location, " - ") {
-						parts := strings.SplitN(location, " - ", 2)
-						return parts[0], parts[1]
-					}
-					return location, ""
+	
+	// Fallback: look for any time-like pattern manually
+	words := strings.Fields(context)
+	for i, word := range words {
+		if strings.Contains(word, ":") && len(word) <= 6 {
+			// Check if next word is AM/PM
+			if i+1 < len(words) {
+				next := strings.ToUpper(words[i+1])
+				if strings.HasPrefix(next, "AM") || strings.HasPrefix(next, "PM") {
+					timeResult := word + " " + strings.Fields(next)[0]
+					log.Printf("Found time manually: %s", timeResult)
+					return timeResult
 				}
 			}
 		}
 	}
-	return "TBD", ""
+	
+	log.Printf("No time found in context")
+	return "TBD"
 }
 
+// IMPROVED: Better venue and field extraction
+func findVenueAndFieldInContext(context string) (string, string) {
+	// Look for common venue patterns
+	venuePatterns := []string{
+		// Look for links with location info
+		`<a[^>]*href="[^"]*schedules\?pitch[^"]*"[^>]*>([^<]+)</a>`,
+		// Look for text containing venue keywords
+		`([\w\s]*(Complex|Park|Field|Stadium|Center|Facility)[\w\s]*)`,
+	}
+	
+	for _, pattern := range venuePatterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindAllStringSubmatch(context, -1)
+		for _, match := range matches {
+			if len(match) >= 2 {
+				location := strings.TrimSpace(match[1])
+				if len(location) > 5 && len(location) < 100 {
+					// Check if it contains field info
+					if strings.Contains(location, " - ") {
+						parts := strings.SplitN(location, " - ", 2)
+						venue := strings.TrimSpace(parts[0])
+						field := strings.TrimSpace(parts[1])
+						log.Printf("Found venue: '%s' and field: '%s'", venue, field)
+						return venue, field
+					} else if strings.Contains(strings.ToLower(location), "field") {
+						log.Printf("Found field: '%s'", location)
+						return "", location
+					} else {
+						log.Printf("Found venue: '%s'", location)
+						return location, ""
+					}
+				}
+			}
+		}
+	}
+	
+	// Fallback: look for any location-like text
+	lines := strings.Split(context, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// Look for venue in links
+		if strings.Contains(line, "schedules?pitch") && strings.Contains(line, "<a href=") {
+			if start := strings.Index(line, ">"); start != -1 {
+				if end := strings.Index(line[start+1:], "<"); end != -1 {
+					location := strings.TrimSpace(line[start+1 : start+1+end])
+					if len(location) > 5 && (strings.Contains(location, "Complex") || 
+						strings.Contains(location, "Park") || 
+						strings.Contains(location, "Field") ||
+						strings.Contains(location, "Center")) {
+						
+						if strings.Contains(location, " - ") {
+							parts := strings.SplitN(location, " - ", 2)
+							venue := strings.TrimSpace(parts[0])
+							field := strings.TrimSpace(parts[1])
+							log.Printf("Found venue (fallback): '%s' and field: '%s'", venue, field)
+							return venue, field
+						}
+						log.Printf("Found venue (fallback): '%s'", location)
+						return location, ""
+					}
+				}
+			}
+		}
+	}
+	
+	log.Printf("No venue/field found in context")
+	return "TBD", "TBD"
+}
+
+// IMPROVED: Better division extraction
 func findDivisionInContext(context string) string {
-	if strings.Contains(context, "Premier") {
+	// Look for division patterns in team names or context
+	divisionPatterns := []string{
+		`(\d{2}[BG][\w\s]*(?:NPL|Elite|Premier|Gold|Silver|Bronze))`,
+		`(U\d{2}[\w\s]*(?:NPL|Elite|Premier|Gold|Silver|Bronze))`,
+		`(\d{4}[BG][\w\s]*)`,
+		`(Premier)`,
+		`(NPL)`,
+		`(Elite)`,
+		`(Gold)`,
+		`(Silver)`,
+	}
+	
+	for _, pattern := range divisionPatterns {
+		re := regexp.MustCompile(`(?i)` + pattern)
+		matches := re.FindStringSubmatch(context)
+		if len(matches) >= 2 {
+			division := strings.TrimSpace(matches[1])
+			log.Printf("Found division: '%s'", division)
+			return division
+		}
+	}
+	
+	// Fallback checks
+	contextLower := strings.ToLower(context)
+	if strings.Contains(contextLower, "premier") {
 		return "Premier"
 	}
-	if strings.Contains(context, "Gold") {
+	if strings.Contains(contextLower, "npl") {
+		return "NPL"
+	}
+	if strings.Contains(contextLower, "elite") {
+		return "Elite"
+	}
+	if strings.Contains(contextLower, "gold") {
 		return "Gold"
 	}
+	
 	return "League"
 }
 
@@ -356,10 +473,10 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	
 	json.NewEncoder(w).Encode(map[string]string{
 		"status":      "healthy",
-		"service":     "Weekend-Only GotSport Parser",
-		"version":     "10.0-weekend-only",
+		"service":     "Enhanced Weekend-Only GotSport Parser",
+		"version":     "11.0-enhanced-extraction",
 		"timestamp":   time.Now().Format(time.RFC3339),
-		"description": "Only processes next weekend games - much faster",
+		"description": "Enhanced field extraction with regex patterns",
 	})
 }
 
@@ -372,13 +489,20 @@ func main() {
 	http.HandleFunc("/schedule", scheduleHandler)
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Weekend-Only GotSport Parser v10.0\n\nOnly looks for next Saturday/Sunday games - ultra fast!\n\nEndpoints:\n- /health\n- /schedule?eventid=44145&clubid=12893")
+		fmt.Fprintf(w, "Enhanced Weekend-Only GotSport Parser v11.0\n\nImproved field extraction with regex patterns!\n\nEndpoints:\n- /health\n- /schedule?eventid=44145&clubid=12893")
 	})
 
-	log.Printf("Weekend-Only GotSport Parser v10.0 starting on port %s", port)
-	log.Printf("Will only process next weekend games for maximum speed")
+	log.Printf("Enhanced Weekend-Only GotSport Parser v11.0 starting on port %s", port)
+	log.Printf("Enhanced extraction with better time/venue detection")
 	
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Server start failed: %v", err)
 	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
