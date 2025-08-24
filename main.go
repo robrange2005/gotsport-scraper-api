@@ -167,13 +167,12 @@ func parseWeekendGames(html, eventID string) []Game {
 		}
 	}
 	for _, sun := range sundayFormats {
-		if strings.Contains(htmlLower, strings.ToLower(sun {
-		})) {
-			if s := extractSectionAroundDate(html, sun); s != "" {
-				weekendSections = append(weekendSections, s)
-			}
+	if strings.Contains(htmlLower, strings.ToLower(sun)) {
+		if s := extractSectionAroundDate(html, sun); s != "" {
+			weekendSections = append(weekendSections, s)
 		}
 	}
+}
 	if len(weekendSections) == 0 {
 		weekendSections = append(weekendSections, html)
 	}
@@ -413,3 +412,4 @@ func logRequests(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
