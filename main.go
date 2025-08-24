@@ -17,7 +17,7 @@ type Game struct {
 	AwayTeam    string `json:"awayTeam"`
 	Date        string `json:"date"`
 	Time        string `json:"time"`
-	Location    string `json:"location"` // Combined field and venue
+	Location    string `json:"location"`
 	Division    string `json:"division"`
 	Competition string `json:"competition"`
 }
@@ -32,16 +32,20 @@ func getNextWeekendDates() ([]string, []string) {
 	nextSaturday := now.AddDate(0, 0, daysUntilSaturday)
 	nextSunday := nextSaturday.AddDate(0, 0, 1)
 
-	// Support multiple date formats to match GotSport HTML
+	// Support more date formats
 	saturdayFormats := []string{
-		nextSaturday.Format("January 02, 2006"), // e.g., "August 30, 2025"
-		nextSaturday.Format("01/02/2006"),       // e.g., "08/30/2025"
-		nextSaturday.Format("Jan 02, 2006"),     // e.g., "Aug 30, 2025"
+		nextSaturday.Format("January 02, 2006"), // "August 30, 2025"
+		nextSaturday.Format("Jan 02, 2006"),     // "Aug 30, 2025"
+		nextSaturday.Format("01/02/2006"),       // "08/30/2025"
+		nextSaturday.Format("02-Jan-2006"),      // "30-Aug-2025"
+		nextSaturday.Format("Jan 02 2006"),      // "Aug 30 2025"
 	}
 	sundayFormats := []string{
-		nextSunday.Format("January 02, 2006"), // e.g., "August 31, 2025"
-		nextSunday.Format("01/02/2006"),      // e.g., "08/31/2025"
-		nextSunday.Format("Jan 02, 2006"),    // e.g., "Aug 31, 2025"
+		nextSunday.Format("January 02, 2006"),
+		nextSunday.Format("Jan 02, 2006"),
+		nextSunday.Format("01/02/2006"),
+		nextSunday.Format("02-Jan-2006"),
+		nextSunday.Format("Jan 02 2006"),
 	}
 
 	log.Printf("Looking for weekend date patterns: Saturday %v, Sunday %v", saturdayFormats, sundayFormats)
@@ -52,9 +56,10 @@ func scrapeGotSportSchedule(eventID, clubID string) ([]Game, error) {
 	url := fmt.Sprintf("https://system.gotsport.com/org_event/events/%s/schedules?club=%s", eventID, clubID)
 	log.Printf("Fetching: %s", url)
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second} // Increased timeout
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
+		log.Printf("Failed to create request: %v", err)
 		return nil, fmt.Errorf("request failed: %v", err)
 	}
 
@@ -63,17 +68,20 @@ func scrapeGotSportSchedule(eventID, clubID string) ([]Game, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		log.Printf("HTTP request failed: %v", err)
+		return nil, fmt.Errorf("http request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
+		log.Printf("Non-200 status code: %d", resp.StatusCode)
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		log.Printf("Failed to read response body: %v", err)
+		return nil, fmt.Errorf("read body failed: %v", err)
 	}
 
 	html := string(body)
@@ -92,7 +100,7 @@ func parseWeekendGames(html, eventID string) []Game {
 
 	var weekendSections []string
 
-	// Check for any Saturday date pattern
+	// Check for Saturday and Sunday date patterns
 	for _, satPattern := range saturdayFormats {
 		if strings.Contains(htmlLower, strings.ToLower(satPattern)) {
 			section := extractSectionAroundDate(html, satPattern)
@@ -103,7 +111,6 @@ func parseWeekendGames(html, eventID string) []Game {
 		}
 	}
 
-	// Check for any Sunday date pattern
 	for _, sunPattern := range sundayFormats {
 		if strings.Contains(htmlLower, strings.ToLower(sunPattern)) {
 			section := extractSectionAroundDate(html, sunPattern)
@@ -126,14 +133,15 @@ func parseWeekendGames(html, eventID string) []Game {
 func extractSectionAroundDate(html, dateStr string) string {
 	index := strings.Index(strings.ToLower(html), strings.ToLower(dateStr))
 	if index == -1 {
+		log.Printf("Date pattern %s not found in HTML", dateStr)
 		return ""
 	}
 
-	start := index - 3000 // Increased to capture more context
+	start := index - 4000 // Increased context
 	if start < 0 {
 		start = 0
 	}
-	end := index + 6000
+	end := index + 8000
 	if end > len(html) {
 		end = len(html)
 	}
@@ -155,12 +163,12 @@ func findRenoApexGamesInSection(section string) []Game {
 				if strings.Contains(strings.ToLower(homeTeamPart), "reno apex") {
 					log.Printf("Found HOME game: %s - %s", homeTeamPart, awayTeamPart)
 
-					// Capture more context around the line
-					start := i - 5
+					// Capture more context
+					start := i - 10
 					if start < 0 {
 						start = 0
 					}
-					end := i + 5
+					end := i + 10
 					if end > len(lines) {
 						end = len(lines)
 					}
@@ -169,8 +177,8 @@ func findRenoApexGamesInSection(section string) []Game {
 					game := extractGameFromLine(line, context)
 					if game.HomeTeam != "" && !isDuplicateGame(games, game) {
 						games = append(games, game)
-						log.Printf("Added home game: %s vs %s at %s %s", 
-							game.HomeTeam, game.AwayTeam, game.Time, game.Location)
+						log.Printf("Added home game: %s vs %s at %s %s (%s)", 
+							game.HomeTeam, game.AwayTeam, game.Time, game.Location, game.Date)
 					}
 				} else {
 					log.Printf("Skipping AWAY game: %s - %s", homeTeamPart, awayTeamPart)
@@ -194,7 +202,6 @@ func extractGameFromLine(gameLine string, context string) Game {
 		game.AwayTeam = extractTeamNameFromText(awayRaw)
 	}
 
-	// Extract date, time, location, and division from context
 	game.Date = findDateInContext(context)
 	game.Time = findTimeInContext(context)
 	game.Location = findLocationInContext(context)
@@ -222,11 +229,13 @@ func findDateInContext(context string) string {
 	nextSaturday := now.AddDate(0, 0, daysUntilSaturday)
 	nextSunday := nextSaturday.AddDate(0, 0, 1)
 
-	// Try multiple date formats
+	// Broader date patterns
 	datePatterns := []string{
-		`January\s+\d{1,2},\s+\d{4}`, // e.g., "August 30, 2025"
-		`Jan\s+\d{1,2},\s+\d{4}`,    // e.g., "Aug 30, 2025"
-		`\d{1,2}/\d{1,2}/\d{4}`,     // e.g., "08/30/2025"
+		`January\s+\d{1,2},\s+\d{4}`, // "August 30, 2025"
+		`Jan\s+\d{1,2},\s+\d{4}`,    // "Aug 30, 2025"
+		`\d{1,2}/\d{1,2}/\d{4}`,     // "08/30/2025"
+		`\d{1,2}-[A-Za-z]{3}-\d{4}`, // "30-Aug-2025"
+		`Jan\s+\d{1,2}\s+\d{4}`,     // "Aug 30 2025"
 	}
 
 	for _, pattern := range datePatterns {
@@ -234,7 +243,6 @@ func findDateInContext(context string) string {
 		matches := re.FindStringSubmatch(context)
 		if len(matches) > 0 {
 			dateStr := matches[0]
-			// Convert to standard format
 			parsed, err := time.Parse("January 02, 2006", dateStr)
 			if err != nil {
 				parsed, err = time.Parse("Jan 02, 2006", dateStr)
@@ -242,45 +250,55 @@ func findDateInContext(context string) string {
 			if err != nil {
 				parsed, err = time.Parse("01/02/2006", dateStr)
 			}
+			if err != nil {
+				parsed, err = time.Parse("02-Jan-2006", dateStr)
+			}
+			if err != nil {
+				parsed, err = time.Parse("Jan 02 2006", dateStr)
+			}
 			if err == nil {
+				log.Printf("Found date: %s", parsed.Format("2006-01-02"))
 				return parsed.Format("2006-01-02")
 			}
 		}
 	}
 
-	// Fallback to checking Saturday/Sunday patterns
+	// Fallback to Saturday/Sunday
 	saturdayFormats, sundayFormats := getNextWeekendDates()
 	for _, satPattern := range saturdayFormats {
 		if strings.Contains(strings.ToLower(context), strings.ToLower(satPattern)) {
+			log.Printf("Date fallback to Saturday: %s", nextSaturday.Format("2006-01-02"))
 			return nextSaturday.Format("2006-01-02")
 		}
 	}
 	for _, sunPattern := range sundayFormats {
 		if strings.Contains(strings.ToLower(context), strings.ToLower(sunPattern)) {
+			log.Printf("Date fallback to Sunday: %s", nextSunday.Format("2006-01-02"))
 			return nextSunday.Format("2006-01-02")
 		}
 	}
 
-	log.Printf("No date found in context, defaulting to Saturday")
+	log.Printf("No date found in context")
 	return nextSaturday.Format("2006-01-02")
 }
 
 func findTimeInContext(context string) string {
 	timePatterns := []string{
-		`(\d{1,2}:\d{2})\s*(AM|PM)\s*(PDT|PST|PT)?`, // e.g., "1:00 PM PDT"
-		`(\d{1,2}:\d{2})(AM|PM)`,                    // e.g., "1:00PM"
-		`\d{1,2}:\d{2}\s*(?:AM|PM)`,                 // e.g., "1:00 PM"
+		`(\d{1,2}:\d{2})\s*(AM|PM)\s*(PDT|PST|PT)?`, // "1:00 PM PDT"
+		`(\d{1,2}:\d{2})(?:AM|PM)`,                  // "1:00PM"
+		`(\d{1,2}:\d{2}\s*[AP]M)`,                   // "1:00 PM"
 	}
 
 	for _, pattern := range timePatterns {
 		re := regexp.MustCompile(`(?i)` + pattern)
 		matches := re.FindStringSubmatch(context)
-		if len(matches) >= 3 {
-			time := strings.TrimSpace(matches[1])
-			ampm := strings.ToUpper(strings.TrimSpace(matches[2]))
-			timeStr := fmt.Sprintf("%s %s", time, ampm)
-			if len(matches) >= 4 && matches[3] != "" {
-				timeStr += " " + strings.ToUpper(strings.TrimSpace(matches[3]))
+		if len(matches) >= 2 {
+			timeStr := strings.TrimSpace(matches[1])
+			if len(matches) >= 3 {
+				timeStr += " " + strings.ToUpper(strings.TrimSpace(matches[2]))
+				if len(matches) >= 4 && matches[3] != "" {
+					timeStr += " " + strings.ToUpper(strings.TrimSpace(matches[3]))
+				}
 			}
 			log.Printf("Found time: %s", timeStr)
 			return timeStr
@@ -292,29 +310,30 @@ func findTimeInContext(context string) string {
 }
 
 func findLocationInContext(context string) string {
-	// Patterns to match location formats like "Lazy 5 Regional Park - Field 3"
+	// Broader location patterns
 	locationPatterns := []string{
-		`<a[^>]*href="[^"]*schedules\?pitch[^"]*"[^>]*>([^<]+)</a>`, // Link text
-		`([A-Za-z0-9\s\-]+(?:Park|Complex|Field|Stadium|Center|School|High School)[A-Za-z0-9\s\-]*(?:-\s*[A-Za-z0-9\s]+)?)`, // e.g., "Lazy 5 Regional Park - Field 3"
-		`\*\s*([^<\n]+(?:Park|Complex|Field|Stadium|Center|School|High School)[^<\n]*(?:-\s*[A-Za-z0-9\s]+)?)`, // Star-prefixed location
+		`<a[^>]*href="[^"]*schedules\?pitch[^"]*"[^>]*>([^<]+)</a>`,
+		`([A-Za-z0-9\s\-]+(?:Park|Complex|Field|Stadium|Center|School|High School)[A-Za-z0-9\s\-]*(?:[-–]\s*[A-Za-z0-9\s]+)?)`,
+		`\*\s*([^<\n]+(?:Park|Complex|Field|Stadium|Center|School|High School)[^<\n]*(?:[-–]\s*[A-Za-z0-9\s]+)?)`,
+		`(Lazy 5 Regional Park|Bishop Manogue High School)[^<\n]*(?:[-–]\s*[A-Za-z0-9\s]+)?`, // Specific venues
 	}
 
 	for _, pattern := range locationPatterns {
-		re := regexp.MustCompile(pattern)
+		re := regexp.MustCompile(`(?i)` + pattern)
 		matches := re.FindAllStringSubmatch(context, -1)
 		for _, match := range matches {
 			if len(match) >= 2 {
 				location := strings.TrimSpace(match[1])
 				location = strings.Trim(location, "*.,;:")
 				if len(location) > 5 && len(location) < 100 {
-					log.Printf("Found location: '%s'", location)
-				 return location
+					log.Printf("Found location: %s", location)
+					return location
 				}
 			}
 		}
 	}
 
-	// Fallback: Check lines for location-like strings
+	// Fallback: Check lines
 	lines := strings.Split(context, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -324,7 +343,7 @@ func findLocationInContext(context string) string {
 			cleaned := re.ReplaceAllString(line, "")
 			cleaned = strings.TrimSpace(cleaned)
 			if len(cleaned) > 5 && len(cleaned) < 100 {
-				log.Printf("Found location (fallback): '%s'", cleaned)
+				log.Printf("Found location (fallback): %s", cleaned)
 				return cleaned
 			}
 		}
@@ -335,11 +354,10 @@ func findLocationInContext(context string) string {
 }
 
 func findDivisionInContext(context string) string {
-	// Patterns to match division names
 	divisionPatterns := []string{
-		`(2010B\s+NPL\s+East|[A-Za-z0-9\s\-/]+NPL[A-Za-z0-9\s\-]*)`, // e.g., "2010B NPL East"
-		`(2007/08\s+North\s+-\s+Yellow|[A-Za-z0-9\s\-/]+)`,          // e.g., "2007/08 North - Yellow"
-		`(?:Division|League|Group)\s*:?\s*([A-Za-z0-9\s\-/]+)`,       // e.g., "Division: 2010B NPL East"
+		`(2010B\s+NPL\s+East|[A-Za-z0-9\s\-/]+NPL[A-Za-z0-9\s\-]*)`,
+		`(2007/08\s+North\s+-\s+Yellow|[A-Za-z0-9\s\-/]+)`,
+		`(?:Division|League|Group)\s*:?\s*([A-Za-z0-9\s\-/]+)`,
 	}
 
 	for _, pattern := range divisionPatterns {
@@ -348,7 +366,7 @@ func findDivisionInContext(context string) string {
 		if len(matches) >= 2 {
 			division := strings.TrimSpace(matches[1])
 			if len(division) > 3 {
-				log.Printf("Found division: '%s'", division)
+				log.Printf("Found division: %s", division)
 				return division
 			}
 		}
@@ -382,11 +400,12 @@ func scheduleHandler(w http.ResponseWriter, r *http.Request) {
 	clubID := r.URL.Query().Get("clubid")
 
 	if eventID == "" || clubID == "" {
-		http.Error(w, `{"error": "Missing parameters"}`, 400)
+		log.Printf("Missing parameters: eventid=%s, clubid=%s", eventID, clubID)
+		http.Error(w, `{"error": "Missing parameters"}`, http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("Weekend-only request: %s/%s", eventID, clubID)
+	log.Printf("Processing request: eventid=%s, clubid=%s", eventID, clubID)
 
 	var games []Game
 	var err error
@@ -398,11 +417,16 @@ func scheduleHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		log.Printf("Error: %v", err)
-		games = []Game{}
+		log.Printf("Scrape failed: %v", err)
+		http.Error(w, fmt.Sprintf(`{"error": "Scrape failed: %v"}`, err), http.StatusInternalServerError)
+		return
 	}
 
-	log.Printf("Returning %d weekend games", len(games))
+	if len(games) == 0 {
+		log.Printf("No games found for eventid=%s, clubid=%s", eventID, clubID)
+	}
+
+	log.Printf("Returning %d games", len(games))
 	json.NewEncoder(w).Encode(games)
 }
 
@@ -413,9 +437,9 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"status":      "healthy",
 		"service":     "Fixed Home/Away GotSport Parser",
-		"version":     "12.1",
+		"version":     "12.2",
 		"timestamp":   time.Now().Format(time.RFC3339),
-		"description": "Improved date and field parsing with combined location field",
+		"description": "Enhanced error handling and broader parsing patterns",
 	})
 }
 
@@ -428,15 +452,15 @@ func main() {
 	http.HandleFunc("/schedule", scheduleHandler)
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		response := "Fixed Home/Away GotSport Parser v12.1\n\n" +
-			"Improved date and field parsing with combined location field!\n\n" +
+		response := "Fixed Home/Away GotSport Parser v12.2\n\n" +
+			"Enhanced error handling and broader parsing patterns!\n\n" +
 			"Endpoints:\n" +
 			"- /health\n" +
 			"- /schedule?eventid=44145&clubid=12893"
 		fmt.Fprintf(w, response)
 	})
 
-	log.Printf("Fixed Home/Away GotSport Parser v12.1 starting on port %s", port)
+	log.Printf("Fixed Home/Away GotSport Parser v12.2 starting on port %s", port)
 
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Server start failed: %v", err)
