@@ -57,6 +57,7 @@ func scrapeGotSportSchedule(eventID, clubID string) ([]Game, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
+		log.Printf("Failed to create request: %v", err)
 		return nil, fmt.Errorf("request failed: %v", err)
 	}
 
@@ -65,25 +66,36 @@ func scrapeGotSportSchedule(eventID, clubID string) ([]Game, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		log.Printf("HTTP request failed: %v", err)
+		return nil, fmt.Errorf("http request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
+		log.Printf("Non-200 status code: %d", resp.StatusCode)
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		log.Printf("Failed to read response body: %v", err)
+		return nil, fmt.Errorf("read body failed: %v", err)
 	}
 
 	html := string(body)
 	log.Printf("HTML length: %d chars", len(html))
+	log.Printf("HTML snippet: %s...", html[:min(len(html), 1000)])
 
 	games := parseWeekendGames(html, eventID)
 	log.Printf("Found %d weekend games", len(games))
 	return games, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func parseWeekendGames(html, eventID string) []Game {
@@ -133,6 +145,7 @@ func parseWeekendGames(html, eventID string) []Game {
 func extractSectionAroundDate(html, dateStr string) string {
 	index := strings.Index(strings.ToLower(html), strings.ToLower(dateStr))
 	if index == -1 {
+		log.Printf("Date pattern %s not found in HTML", dateStr)
 		return ""
 	}
 
@@ -157,7 +170,7 @@ func findRenoApexGamesInSection(section string) []Game {
 
 	for _, match := range matches {
 		if len(match) >= 8 {
-			matchID := cleanText(match[1])
+			matchID := cleanText(match[1]) // Use matchID to avoid unused variable error
 			dateTime := cleanText(match[2])
 			homeTeam := cleanText(match[3])
 			results := cleanText(match[4])
@@ -165,18 +178,20 @@ func findRenoApexGamesInSection(section string) []Game {
 			location := cleanText(match[6])
 			division := cleanText(match[7])
 
-			if strings.Contains(strings.ToLower(homeTeam), "reno apex") && results == "-" { // Home game check
+			log.Printf("Processing match #%s: %s vs %s at %s", matchID, homeTeam, awayTeam, location)
+
+			if strings.Contains(strings.ToLower(homeTeam), "reno apex") && results == "-" {
 				log.Printf("Found HOME game: %s vs %s", homeTeam, awayTeam)
 
 				game := Game{
-					HomeTeam: homeTeam,
-					AwayTeam: awayTeam,
-					Location: location,
-					Division: division,
+					HomeTeam:    homeTeam,
+					AwayTeam:    awayTeam,
+					Location:    location,
+					Division:    division,
 					Competition: division,
 				}
 
-				// Parse date and time from dateTime cell (e.g., "Aug 30, 2025 1:00PM PDT")
+				// Parse date and time from dateTime cell
 				parsedDate, parsedTime := parseDateTime(dateTime)
 				game.Date = parsedDate
 				game.Time = parsedTime
@@ -184,6 +199,8 @@ func findRenoApexGamesInSection(section string) []Game {
 				if game.Date != "" && game.Time != "TBD" && !isDuplicateGame(games, game) {
 					games = append(games, game)
 					log.Printf("Added game: %s vs %s at %s %s (%s)", game.HomeTeam, game.AwayTeam, game.Time, game.Location, game.Date)
+				} else {
+					log.Printf("Skipped game due to invalid date/time or duplicate: %s vs %s", homeTeam, awayTeam)
 				}
 			}
 		}
@@ -213,6 +230,7 @@ func parseDateTime(dateTime string) (string, string) {
 			parsedDate, err = time.Parse("January 02, 2006", dateStr)
 		}
 		if err == nil {
+			log.Printf("Parsed date: %s, time: %s", parsedDate.Format("2006-01-02"), timeStr)
 			return parsedDate.Format("2006-01-02"), timeStr
 		}
 	}
@@ -224,8 +242,9 @@ func parseDateTime(dateTime string) (string, string) {
 func isDuplicateGame(existingGames []Game, newGame Game) bool {
 	for _, existing := range existingGames {
 		if existing.Date == newGame.Date &&
-		   existing.Time == newGame.Time &&
-		   strings.EqualFold(existing.HomeTeam, newGame.HomeTeam) {
+			existing.Time == newGame.Time &&
+			strings.EqualFold(existing.HomeTeam, newGame.HomeTeam) &&
+			strings.EqualFold(existing.AwayTeam, newGame.AwayTeam) {
 			return true
 		}
 	}
@@ -236,7 +255,7 @@ func scrapeECNLSchedule() ([]Game, error) {
 	return []Game{}, nil
 }
 
-func scheduleHandler(w http.ResponseWriter, r *http.ResponseWriter) {
+func scheduleHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
 
@@ -244,11 +263,12 @@ func scheduleHandler(w http.ResponseWriter, r *http.ResponseWriter) {
 	clubID := r.URL.Query().Get("clubid")
 
 	if eventID == "" || clubID == "" {
-		http.Error(w, `{"error": "Missing parameters"}`, 400)
+		log.Printf("Missing parameters: eventid=%s, clubid=%s", eventID, clubID)
+		http.Error(w, `{"error": "Missing parameters"}`, http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("Weekend-only request: %s/%s", eventID, clubID)
+	log.Printf("Processing request: eventid=%s, clubid=%s", eventID, clubID)
 
 	var games []Game
 	var err error
@@ -260,11 +280,16 @@ func scheduleHandler(w http.ResponseWriter, r *http.ResponseWriter) {
 	}
 
 	if err != nil {
-		log.Printf("Error: %v", err)
-		http.Error(w, fmt.Sprintf(`{"error": "%v"}`, err), 500)
+		log.Printf("Scrape failed: %v", err)
+		http.Error(w, fmt.Sprintf(`{"error": "Scrape failed: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
 
+	if len(games) == 0 {
+		log.Printf("No games found for eventid=%s, clubid=%s", eventID, clubID)
+	}
+
+	log.Printf("Returning %d games", len(games))
 	json.NewEncoder(w).Encode(games)
 }
 
@@ -275,9 +300,9 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"status":      "healthy",
 		"service":     "Fixed Home/Away GotSport Parser",
-		"version":     "12.3",
+		"version":     "12.4",
 		"timestamp":   time.Now().Format(time.RFC3339),
-		"description": "Table-based parsing for GotSport schedules",
+		"description": "Fixed build errors and table-based parsing for GotSport schedules",
 	})
 }
 
@@ -290,15 +315,15 @@ func main() {
 	http.HandleFunc("/schedule", scheduleHandler)
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		response := "Fixed Home/Away GotSport Parser v12.3\n\n" +
-			"Table-based parsing for GotSport schedules!\n\n" +
+		response := "Fixed Home/Away GotSport Parser v12.4\n\n" +
+			"Fixed build errors and table-based parsing for GotSport schedules!\n\n" +
 			"Endpoints:\n" +
 			"- /health\n" +
 			"- /schedule?eventid=44145&clubid=12893"
 		fmt.Fprintf(w, response)
 	})
 
-	log.Printf("Fixed Home/Away GotSport Parser v12.3 starting on port %s", port)
+	log.Printf("Fixed Home/Away GotSport Parser v12.4 starting on port %s", port)
 
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Server start failed: %v", err)
