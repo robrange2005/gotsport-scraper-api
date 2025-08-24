@@ -557,4 +557,51 @@ func scheduleHandler(w http.ResponseWriter, r *http.Request) {
 		games = []Game{}
 	}
 
-	log.Printf("Returning %d weekend gam
+	log.Printf("Returning %d weekend games", len(games))
+	json.NewEncoder(w).Encode(games)
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+	
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":      "healthy",
+		"service":     "Enhanced Weekend-Only GotSport Parser",
+		"version":     "11.0-enhanced-extraction",
+		"timestamp":   time.Now().Format(time.RFC3339),
+		"description": "Enhanced field extraction with complete division names",
+	})
+}
+
+func main() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	http.HandleFunc("/schedule", scheduleHandler)
+	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		response := "Enhanced Weekend-Only GotSport Parser v11.0\n\n" +
+			"Improved field extraction with complete division names!\n\n" +
+			"Endpoints:\n" +
+			"- /health\n" +
+			"- /schedule?eventid=44145&clubid=12893"
+		fmt.Fprintf(w, response)
+	})
+
+	log.Printf("Enhanced Weekend-Only GotSport Parser v11.0 starting on port %s", port)
+	log.Printf("Enhanced extraction with complete division names")
+	
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Fatalf("Server start failed: %v", err)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
